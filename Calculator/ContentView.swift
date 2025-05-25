@@ -62,8 +62,8 @@ struct ContentView: View {
                         HStack(spacing: 12) {
                             CalculatorButton(label: "0", color: Color(white: 0.2), action: { calculator.appendDigit("0") }, width: geometry.size.width * 0.45, height: geometry.size.height * 0.1, isWide: true)
                             CalculatorButton(label: ".", color: Color(white: 0.2), action: { calculator.appendDecimal() }, width: geometry.size.width * 0.2, height: geometry.size.height * 0.1)
-                            // `=` ボタンのアクションで modelContext を渡す
-                            CalculatorButton(label: "=", color: .orange, action: { calculator.calculate(context: modelContext) }, width: geometry.size.width * 0.2, height: geometry.size.height * 0.1)
+                            // `=` ボタンのアクションで modelContext を渡す必要をなくす
+                            CalculatorButton(label: "=", color: .orange, action: { calculator.calculate() }, width: geometry.size.width * 0.2, height: geometry.size.height * 0.1)
                         }
                     }
                     .padding(.horizontal, 24)
@@ -76,6 +76,9 @@ struct ContentView: View {
             }
         }
         .ignoresSafeArea() // ZStack全体ではなく、背景色に適用する方が一般的ですが、元の挙動を維持
+        .onAppear {
+            calculator.setModelContext(modelContext)
+        }
     }
 }
 
@@ -99,8 +102,7 @@ struct HistoryView: View {
     }
 
     var body: some View {
-        logHistoryChanges() // 履歴状態をログ出力
-        return NavigationView { // ナビゲーションビューを追加してタイトルバーを表示
+        NavigationView { // ナビゲーションビューを追加してタイトルバーを表示
             List {
                 // 履歴がない場合の表示
                 if historyEntries.isEmpty {
@@ -125,7 +127,7 @@ struct HistoryView: View {
                         }
                         .swipeActions(edge: .trailing) { // 右スワイプで削除
                             Button(role: .destructive) {
-                                deleteHistoryEntry(entry)
+                                calculator.deleteHistoryEntry(entry)
                             } label: {
                                 Label("削除", systemImage: "trash")
                             }
@@ -140,7 +142,8 @@ struct HistoryView: View {
                 // 左上に全削除ボタン
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("全削除", role: .destructive) {
-                        clearHistory()
+                        calculator.clearHistory()
+                        onDismiss()  // 削除後に画面を閉じる
                     }
                     .disabled(historyEntries.isEmpty) // 履歴が空なら無効化
                 }
@@ -149,6 +152,9 @@ struct HistoryView: View {
                     Button("閉じる", action: onDismiss)
                 }
             }
+        }
+        .onAppear {
+            logHistoryChanges() // 履歴状態をログ出力
         }
     }
 
@@ -211,6 +217,8 @@ import SwiftData // SwiftDataをインポート
 class CalculatorModel: ObservableObject {
     @Published var display: String = "0"
     // @Published var history: [String] = [] // SwiftDataで管理するため削除
+    // ModelContextへの参照を保持
+    private var modelContext: ModelContext?
     private var currentNumber: Double = 0
     private var previousNumber: Double = 0
     private var currentOperation: Operation?
@@ -254,8 +262,8 @@ class CalculatorModel: ObservableObject {
         shouldResetInput = true
     }
     
-    // ModelContextを引数で受け取るように変更
-    func calculate(context: ModelContext) {
+    // ModelContextを引数で受け取る必要をなくす
+    func calculate() {
         guard let operation = currentOperation else { return }
         
         // 計算前に式を構築（デバッグログ追加）
@@ -295,28 +303,37 @@ class CalculatorModel: ObservableObject {
         let newEntry = CalculationHistoryEntry(expression: calculationExpression, timestamp: Date())
         print("New entry created: \(newEntry.expression)")
         
-        context.insert(newEntry)
-        print("Entry inserted into context")
-        
-        do {
-            try context.save() // 明示的に保存して確実に反映
-            print("Successfully saved history entry")
+        // ModelContextが設定されている場合のみ保存処理を行う
+        if let context = modelContext {
+            context.insert(newEntry)
+            print("Entry inserted into context")
             
-            // 保存後にコンテキストの状態を確認
-            let fetchRequest = FetchDescriptor<CalculationHistoryEntry>(
-                sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
-            )
-            let entries = try? context.fetch(fetchRequest)
-            print("Current entries in context: \(entries?.count ?? 0)")
-            
-        } catch {
-            print("Failed to save history entry: \(error.localizedDescription)")
-            print("Detailed error: \(error)")
-            
-            // コンテキストの状態を確認
-            let fetchRequest = FetchDescriptor<CalculationHistoryEntry>()
-            let entries = try? context.fetch(fetchRequest)
-            print("Current entries after failed save: \(entries?.count ?? 0)")
+            do {
+                try context.save() // 明示的に保存して確実に反映
+                print("Successfully saved history entry")
+                
+                // 保存後にコンテキストの状態を確認
+                let fetchRequest = FetchDescriptor<CalculationHistoryEntry>(
+                    sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
+                )
+                let entries = try? context.fetch(fetchRequest)
+                print("Current entries in context: \(entries?.count ?? 0)")
+                if let entries = entries {
+                    for entry in entries {
+                        print("Entry in context: \(entry.expression), \(entry.timestamp)")
+                    }
+                }
+            } catch {
+                print("Failed to save history entry: \(error.localizedDescription)")
+                print("Detailed error: \(error)")
+                
+                // コンテキストの状態を確認
+                let fetchRequest = FetchDescriptor<CalculationHistoryEntry>()
+                let entries = try? context.fetch(fetchRequest)
+                print("Current entries after failed save: \(entries?.count ?? 0)")
+            }
+        } else {
+            print("ModelContext not available for saving history")
         }
         
         currentOperation = nil
@@ -346,20 +363,30 @@ class CalculatorModel: ObservableObject {
         // This function is now handled in the View
     }
     
-    // ModelContextを引数で受け取るように変更
-    func clearHistory(context: ModelContext) {
+    func clearHistory() {
         // SwiftDataから全履歴を削除
+        guard let context = modelContext else {
+            print("ModelContext not available for clearing history")
+            return
+        }
+        
         do {
             try context.delete(model: CalculationHistoryEntry.self)
+            print("Successfully cleared all history")
         } catch {
             print("Failed to delete history: \(error)")
         }
     }
     
-    // CalculationHistoryEntryを引数で受け取るように変更
-    func deleteHistoryEntry(_ entry: CalculationHistoryEntry, context: ModelContext) {
+    func deleteHistoryEntry(_ entry: CalculationHistoryEntry) {
         // SwiftDataから特定の履歴を削除
+        guard let context = modelContext else {
+            print("ModelContext not available for deleting history entry")
+            return
+        }
+        
         context.delete(entry)
+        print("Deleted history entry: \(entry.expression)")
     }
     
     // 履歴の再利用ロジックはView側で処理するため削除
@@ -376,6 +403,11 @@ class CalculatorModel: ObservableObject {
         } else {
             return String(number)
         }
+    }
+    
+    // ModelContextを設定するメソッド
+    func setModelContext(_ context: ModelContext) {
+        self.modelContext = context
     }
 }
 
